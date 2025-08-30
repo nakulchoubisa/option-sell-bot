@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: option-bot
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port 10000"
+    plan: free
+    envVars:
+      - key: API_KEY
+        value: supersecret123
+      - key: BROKER
+        value: paper
+      - key: PRICE_SOURCE
+        value: zerodha
+      - key: KITE_API_KEY
+        sync: false
+      - key: KITE_API_SECRET
+        sync: false
+      - key: KITE_ACCESS_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: option-bot-db
+          property: connectionString
+
+databases:
+  - name: option-bot-db
+    plan: free

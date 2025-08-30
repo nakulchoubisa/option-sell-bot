@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15
+    container_name: db-1
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: option_bot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  option-bot:
+    build: .
+    container_name: option-bot-1
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    environment:
+      API_KEY: "supersecret123"
+      DATABASE_URL: "postgresql://postgres:postgres@db:5432/option_bot"
+      KITE_API_KEY: lmim46pxidif4lpa
+      KITE_API_SECRET: wa673cer4fefdxy6dx736c1xqp6k8h8n
+      KITE_ACCESS_TOKEN: tz61BMXyoBeLIItTxUWqhtC2uqTBAzwg
+    volumes:
+      - .:/app
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+
+volumes:
+  pgdata:

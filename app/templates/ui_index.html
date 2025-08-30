@@ -1,0 +1,321 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Option Bot – Operator Console</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; }
+    input, select, button { padding: 8px; }
+    .ok { color: #0a0; }
+    .warn { color: #b90; }
+    .err { color: #c00; }
+    small.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .text-success { color: green; }
+    .text-danger { color: red; }
+    .text-muted { color: gray; }
+    button { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h2>Option Bot – Operator Console</h2>
+
+  <div class="row card">
+    <div>
+      <label>API Key (X-API-Key)</label><br/>
+      <input id="apiKey" placeholder="supersecret123" style="min-width:300px" />
+      <button onclick="saveApiKey()">Save</button>
+      <small class="mono" id="apiKeyStatus"></small>
+    </div>
+    <div>
+      <label>Price Source</label><br/>
+      <select id="pricerSelect">
+        <option value="mock">mock</option>
+        <option value="zerodha">zerodha</option>
+      </select>
+      <button onclick="setPricer()">Switch</button>
+      <small id="pricerInfo" class="mono"></small>
+    </div>
+    <div>
+      <label>Broker Mode</label><br/>
+      <button onclick="getBrokerMode()">Check</button>
+      <small id="brokerMode" class="mono"></small>
+    </div>
+    <div>
+      <label>Kite</label><br/>
+      <a href="/kite/login" target="_blank">Login / Get request_token</a>
+      &nbsp;|&nbsp;
+      <a href="/docs#/" target="_blank">API Docs</a>
+    </div>
+  </div>
+
+  <div class="row">
+    <!-- LTP Card -->
+    <div class="card">
+      <h3>LTP</h3>
+      <div>
+        <input id="ltpSymbol" placeholder="NSE:INFY" />
+        <button onclick="getLTP(true)">Start Live</button>
+        <button onclick="stopLiveLTP()">Stop Live</button>
+      </div>
+      <div id="ltpOut" class="mono"></div>
+    </div>
+
+    <!-- Paper Order Card -->
+    <div class="card">
+      <h3>Paper Order</h3>
+      <div>
+        <input id="ordSymbol" placeholder="NFO:NIFTY25AUG24500CE" style="min-width:260px" />
+        <select id="ordSide">
+          <option>SELL</option>
+          <option>BUY</option>
+        </select>
+        <input id="ordQty" type="number" value="50" style="width:90px" />
+        <select id="ordType">
+          <option>MARKET</option>
+          <option>LIMIT</option>
+        </select>
+        <input id="ordPrice" type="number" step="0.05" placeholder="(limit price optional)" style="width:170px" />
+        <button onclick="placeOrder()">Place</button>
+      </div>
+      <div id="orderOut" class="mono"></div>
+    </div>
+  </div>
+
+  <div class="row" style="gap:24px">
+    <!-- Positions Card -->
+    <div class="card" style="flex:1">
+      <h3>Positions</h3>
+      <button onclick="loadPositions()">Refresh</button>
+      <table id="posTable">
+        <thead>
+          <tr><th>ID</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Avg</th><th>LTP</th><th>Unrealised P&L</th><th>Status</th><th>Opened</th><th>Close</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <!-- Orders Card -->
+    <div class="card" style="flex:1">
+      <h3>Orders</h3>
+      <button onclick="loadOrders()">Refresh</button>
+      <table id="ordTable">
+        <thead><tr><th>ID</th><th>PosID</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th><th>Created</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- P&L Card -->
+  <div class="card">
+    <h3>Today P&L</h3>
+    <button onclick="loadPnl()">Refresh</button>
+    <div id="pnl"></div>
+  </div>
+  <!-- Option Contracts Card -->
+  <div class="card">
+    <h3>Option Contracts</h3>
+    <input id="underlyingInput" value="NIFTY" />
+    <button onclick="syncInstruments()">Sync Instruments</button>
+    <button onclick="loadOptions()">Load Options</button>
+    <div id="optionsOut" style="max-height:300px; overflow:auto; white-space:pre;"></div>
+  </div>
+<script>
+const s = (id) => document.getElementById(id);
+
+function headers() {
+  const key = localStorage.getItem('X_API_KEY') || '';
+  return { 'Content-Type': 'application/json', 'X-API-Key': key };
+}
+
+function saveApiKey() {
+  localStorage.setItem('X_API_KEY', s('apiKey').value || '');
+  s('apiKeyStatus').textContent = 'Saved';
+}
+
+(function initKey(){
+  const k = localStorage.getItem('X_API_KEY') || '';
+  s('apiKey').value = k;
+  s('apiKeyStatus').textContent = k ? 'Loaded' : 'Not set';
+})();
+
+async function getBrokerMode(){
+  const r = await fetch('/broker/mode', { headers: headers() });
+  s('brokerMode').textContent = r.ok ? JSON.stringify(await r.json()) : 'ERR';
+}
+
+async function setPricer(){
+  const source = s('pricerSelect').value;
+  const r = await fetch('/broker/pricer', {
+    method: 'POST', headers: headers(),
+    body: JSON.stringify({ source })
+  });
+  s('pricerInfo').textContent = r.ok ? JSON.stringify(await r.json()) : 'ERR';
+}
+
+async function fetchJSON(url, opts={}) {
+  try {
+    const r = await fetch(url, opts);
+    if(!r.ok) return { error: await r.text() };
+    return await r.json();
+  } catch(e) { return { error: e.message }; }
+}
+
+// --- LTP Live Feature ---
+let liveLtpInterval = null;
+let lastLtp = null;
+
+async function getLTP(live=false) {
+  const sym = s('ltpSymbol').value.trim();
+  if(!sym) { s('ltpOut').textContent = 'Enter symbol'; return; }
+
+  const data = await fetchJSON('/broker/ltp?symbol=' + encodeURIComponent(sym), { headers: headers() });
+  if(data.error) {
+    s('ltpOut').textContent = data.error;
+    return;
+  }
+
+  const ltp = data.ltp || data.price || 0;
+  let color = 'text-muted';
+  if(lastLtp !== null) color = ltp > lastLtp ? 'text-success' : (ltp < lastLtp ? 'text-danger' : 'text-muted');
+  s('ltpOut').innerHTML = `<span class="${color}">${ltp}</span>`;
+  lastLtp = ltp;
+
+  updatePositionsLTP(ltp, sym);
+
+  if(live && liveLtpInterval === null) {
+    liveLtpInterval = setInterval(()=>getLTP(true), 3000);
+  }
+}
+
+function stopLiveLTP() {
+  if(liveLtpInterval) { clearInterval(liveLtpInterval); liveLtpInterval = null; }
+  s('ltpOut').textContent += ' (Live Stopped)';
+}
+
+// --- Orders ---
+async function placeOrder(){
+  const body = {
+    symbol: s('ordSymbol').value.trim(),
+    side: s('ordSide').value,
+    qty: Number(s('ordQty').value || 0),
+    order_type: s('ordType').value,
+    price: s('ordPrice').value ? Number(s('ordPrice').value) : null,
+    product: "MIS",
+    variety: "regular"
+  };
+  const r = await fetch('/broker/order', {
+    method: 'POST', headers: headers(), body: JSON.stringify(body)
+  });
+  const res = r.ok ? await r.json() : { error: await r.text() };
+  s('orderOut').textContent = JSON.stringify(res);
+  loadOrders(); loadPositions();
+}
+
+// --- Positions table ---
+async function loadPositions(){
+  const data = await fetchJSON('/broker/positions', { headers: headers() });
+  const tbody = s('posTable').querySelector('tbody');
+  tbody.innerHTML = '';
+  for(const p of data) {
+    let color = '';
+    if(p.unrealised > 0) color='text-success';
+    else if(p.unrealised < 0) color='text-danger';
+
+    tbody.innerHTML += `<tr id="pos_${p.id}" class="${color}">
+      <td>${p.id}</td>
+      <td>${p.symbol}</td>
+      <td>${p.side}</td>
+      <td>${p.qty}</td>
+      <td>${p.avg_price}</td>
+      <td class="ltpCell">${p.ltp || ''}</td>
+      <td class="unrealised">${p.unrealised || 0}</td>
+      <td>${p.status}</td>
+      <td>${p.opened_at}</td>
+      <td>
+        ${p.status === "OPEN" ? `<button onclick="closePosition(${p.id})">Close</button>` : (p.close_price || '')}
+      </td>
+    </tr>`;
+  }
+}
+
+async function closePosition(posId){
+  const r = await fetch(`/broker/positions/${posId}/close`, {
+    method: 'POST',
+    headers: headers()
+  });
+  const res = r.ok ? await r.json() : { error: await r.text() };
+  alert(JSON.stringify(res));
+  loadPositions();
+  loadOrders();
+  loadPnl();   // refresh P&L after closing
+}
+
+// Update positions table dynamically
+function updatePositionsLTP(latestLTP, symbol){
+  const rows = s('posTable').querySelectorAll('tbody tr');
+  rows.forEach(row => {
+    if(!row) return;
+    const sym = row.children[1].textContent;
+    const side = row.children[2].textContent;
+    const avg = parseFloat(row.children[4].textContent);
+    const qty = parseFloat(row.children[3].textContent);
+
+    if(sym === symbol){
+      const ltpCell = row.querySelector('.ltpCell');
+      ltpCell.textContent = latestLTP;
+
+      let unrealised = (side === 'BUY' ? (latestLTP - avg) : (avg - latestLTP)) * qty;
+      const unrealCell = row.querySelector('.unrealised');
+      unrealCell.textContent = unrealised.toFixed(2);
+      row.className = unrealised > 0 ? 'text-success' : (unrealised < 0 ? 'text-danger' : '');
+    }
+  });
+}
+
+// --- Orders table ---
+async function loadOrders(){
+  const data = await fetchJSON('/broker/orders', { headers: headers() });
+  const tbody = s('ordTable').querySelector('tbody');
+  tbody.innerHTML = '';
+  for(const o of data){
+    tbody.innerHTML += `<tr>
+      <td>${o.id}</td>
+      <td>${o.position_id}</td>
+      <td>${o.symbol}</td>
+      <td>${o.side}</td>
+      <td>${o.qty}</td>
+      <td>${o.price}</td>
+      <td>${o.status}</td>
+      <td>${o.created_at}</td>
+    </tr>`;
+  }
+}
+
+// --- P&L ---
+async function loadPnl(){
+  const data = await fetchJSON('/broker/pnl', { headers: headers() });
+  s('pnl').textContent = `Realised: ${data.realised || 0}, Unrealised: ${data.unrealised || 0}, Total: ${data.total || 0}`;
+}
+
+// Auto-refresh every 5 sec
+setInterval(()=>{ loadPositions(); loadOrders(); loadPnl(); }, 5000);
+
+async function syncInstruments(){
+  const res = await fetchJSON('/broker/instruments/sync', { method: 'POST', headers: headers() });
+  alert(JSON.stringify(res));
+}
+
+async function loadOptions(){
+  const underlying = s('underlyingInput').value || 'NIFTY';
+  const data = await fetchJSON('/broker/options/' + encodeURIComponent(underlying), { headers: headers() });
+  s('optionsOut').textContent = JSON.stringify(data, null, 2);
+}
+
+</script>
+</body>
+</html>
