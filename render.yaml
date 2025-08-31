@@ -1,11 +1,9 @@
 services:
   - type: web
     name: option-bot
-    env: python
-    runtime: python-3.11
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port 10000"
+    env: docker
     plan: free
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: API_KEY
         value: supersecret123
@@ -27,4 +25,3 @@ services:
 databases:
   - name: option-bot-db
     plan: free
-
