@@ -17,6 +17,7 @@ from app.brokers.paper import PaperBroker
 from app.brokers.zerodha_data import ZerodhaData
 from app.pnl import compute_today_pnl
 from app.brokers.zerodha_data import ZerodhaData
+from fastapi.responses import RedirectResponse
 try:
     from kiteconnect import KiteConnect
 except Exception:
@@ -60,9 +61,10 @@ async def on_startup():
     print(f"DB initialized, broker={BROKER}, price_source={price_source}")
 
 # ---------- Health ----------
-@app.get("/", tags=["health"])
-def health():
-    return {"status": "ok", "broker": BROKER}
+# ---------- Health / Root ----------
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/ui")
 
 # ---------- Broker Endpoints ----------
 @app.get("/broker/mode")
