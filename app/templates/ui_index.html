@@ -137,8 +137,13 @@ function saveApiKey() {
   s('apiKeyStatus').textContent = 'Saved';
 }
 
+// --- 🔑 Fix: preload default API key if not set ---
 (function initKey(){
-  const k = localStorage.getItem('X_API_KEY') || '';
+  let k = localStorage.getItem('X_API_KEY');
+  if(!k) {
+    k = "supersecret123";   // default for Render demo
+    localStorage.setItem('X_API_KEY', k);
+  }
   s('apiKey').value = k;
   s('apiKeyStatus').textContent = k ? 'Loaded' : 'Not set';
 })();
