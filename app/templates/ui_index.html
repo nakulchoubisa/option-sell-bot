@@ -116,14 +116,16 @@
     <button onclick="loadPnl()">Refresh</button>
     <div id="pnl"></div>
   </div>
-  <!-- Option Contracts Card -->
-  <div class="card">
-    <h3>Option Contracts</h3>
+ <!-- Option Contracts Card -->
+<div class="card" style="overflow-x:auto">
+  <h3>Option Chain – NIFTY</h3>
+  <div>
     <input id="underlyingInput" value="NIFTY" />
     <button onclick="syncInstruments()">Sync Instruments</button>
-    <button onclick="loadOptions()">Load Options</button>
-    <div id="optionsOut" style="max-height:300px; overflow:auto; white-space:pre;"></div>
+    <button onclick="loadOptionChain()">Load Option Chain</button>
   </div>
+  <div id="optionChainOut" style="max-height:500px; overflow:auto;"></div>
+</div>
 <script>
 const s = (id) => document.getElementById(id);
 
@@ -320,6 +322,85 @@ async function loadOptions(){
   const data = await fetchJSON('/broker/options/' + encodeURIComponent(underlying), { headers: headers() });
   s('optionsOut').textContent = JSON.stringify(data, null, 2);
 }
+
+// Load option chain expiry-wise
+async function loadOptionChain(){
+  const underlying = s('underlyingInput').value || 'NIFTY';
+  const data = await fetchJSON('/broker/options/' + encodeURIComponent(underlying), { headers: headers() });
+  if(data.error) {
+    s('optionChainOut').textContent = data.error;
+    return;
+  }
+
+  // Group by expiry
+  const grouped = {};
+  for(const opt of data){
+    if(!grouped[opt.expiry]) grouped[opt.expiry] = [];
+    grouped[opt.expiry].push(opt);
+  }
+
+  let html = "";
+  for(const expiry of Object.keys(grouped).sort()){
+    const contracts = grouped[expiry];
+    contracts.sort((a,b)=>a.strike-b.strike);
+
+    html += `<h4>Expiry: ${expiry}</h4>
+      <table border="1" style="border-collapse:collapse; width:100%; text-align:center; margin-bottom:16px">
+      <thead>
+        <tr>
+          <th colspan="4">CALLS</th>
+          <th>Strike</th>
+          <th colspan="4">PUTS</th>
+        </tr>
+        <tr>
+          <th>LTP</th><th>OI</th><th>Buy</th><th>Sell</th>
+          <th></th>
+          <th>Buy</th><th>Sell</th><th>OI</th><th>LTP</th>
+        </tr>
+      </thead>
+      <tbody>`;
+
+    for(const c of contracts){
+      if(c.type==="CE"){
+        const put = contracts.find(p => p.strike===c.strike && p.type==="PE");
+        html += `<tr>
+          <td>${c.ltp||'-'}</td>
+          <td>${c.oi||'-'}</td>
+          <td><button onclick="placeOC('${c.symbol}','BUY')">Buy</button></td>
+          <td><button onclick="placeOC('${c.symbol}','SELL')">Sell</button></td>
+          <td>${c.strike}</td>
+          <td>${put ? `<button onclick="placeOC('${put.symbol}','BUY')">Buy</button>`:'-'}</td>
+          <td>${put ? `<button onclick="placeOC('${put.symbol}','SELL')">Sell</button>`:'-'}</td>
+          <td>${put?.oi || '-'}</td>
+          <td>${put?.ltp || '-'}</td>
+        </tr>`;
+      }
+    }
+
+    html += `</tbody></table>`;
+  }
+
+  s('optionChainOut').innerHTML = html;
+}
+
+// Place Buy/Sell directly from option chain
+async function placeOC(symbol, side){
+  const body = {
+    symbol, side,
+    qty: 50,  // default lot size
+    order_type: "MARKET",
+    product: "MIS",
+    variety: "regular"
+  };
+  const r = await fetch('/broker/order', {
+    method:'POST', headers: headers(), body: JSON.stringify(body)
+  });
+  const res = r.ok ? await r.json() : { error: await r.text() };
+  alert(side + " " + symbol + " -> " + JSON.stringify(res));
+  loadOrders();
+  loadPositions();
+}
+
 
 </script>
 </body>
