@@ -18,6 +18,10 @@ from app.brokers.zerodha_data import ZerodhaData
 from app.pnl import compute_today_pnl
 from app.brokers.zerodha_data import ZerodhaData
 from fastapi.responses import RedirectResponse
+from app.main import pricer   # adjust import if needed
+from fastapi import APIRouter
+from kiteconnect import KiteConnect
+from dotenv import load_dotenv
 try:
     from kiteconnect import KiteConnect
 except Exception:
@@ -317,6 +321,57 @@ def get_options(symbol: str, ok: bool = Depends(require_key)):
         import traceback
         print("Error in /broker/options:", traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Options fetch failed: {str(e)}")
+        
+        
+router = APIRouter()
+load_dotenv()
+
+# Assume you already have a global broker/pricer object for Zerodha
+
+
+@router.get("/kite/callback")
+async def kite_callback(request: Request):
+    req_token = request.query_params.get("request_token")
+    if not req_token:
+        return {"error": "Missing request_token"}
+
+    kite = KiteConnect(api_key=os.getenv("KITE_API_KEY"))
+
+    try:
+        data = kite.generate_session(req_token, api_secret=os.getenv("KITE_API_SECRET"))
+    except Exception as e:
+        return {"error": f"Failed to generate session: {str(e)}"}
+
+    access_token = data["access_token"]
+
+    # --- Save into .env (overwrite old entry) ---
+    env_path = ".env"
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+
+    with open(env_path, "w") as f:
+        found = False
+        for line in lines:
+            if line.startswith("KITE_ACCESS_TOKEN="):
+                f.write(f"KITE_ACCESS_TOKEN={access_token}\n")
+                found = True
+            else:
+                f.write(line)
+        if not found:
+            f.write(f"KITE_ACCESS_TOKEN={access_token}\n")
+
+    # --- Apply immediately to running bot ---
+    kite.set_access_token(access_token)
+    if hasattr(pricer, "kite"):
+        pricer.kite.set_access_token(access_token)
+    pricer.access_token = access_token
+
+    return {
+        "message": "Access token updated (live + saved to .env).",
+        "access_token": access_token
+    }
 
 
 # ---------- UI ----------
