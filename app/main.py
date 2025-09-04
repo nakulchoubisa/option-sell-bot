@@ -3,10 +3,11 @@ from datetime import datetime
 import os
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Header, Query, Request, Body, Path
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, Request, Body, Path, APIRouter
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 from app.db import SessionLocal, init_db
 from app.model import Position
@@ -16,16 +17,13 @@ from app.brokers.mock import MockBroker
 from app.brokers.paper import PaperBroker
 from app.brokers.zerodha_data import ZerodhaData
 from app.pnl import compute_today_pnl
-from app.brokers.zerodha_data import ZerodhaData
-from fastapi.responses import RedirectResponse
-from app.main import pricer   # adjust import if needed
-from fastapi import APIRouter
-from kiteconnect import KiteConnect
-from dotenv import load_dotenv
+from app import state
+
 try:
     from kiteconnect import KiteConnect
 except Exception:
     KiteConnect = None
+
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Option Selling Bot API")
@@ -46,41 +44,42 @@ def get_db():
         db.close()
 
 # ---------- Broker ----------
-broker = None
 @app.on_event("startup")
 async def on_startup():
-    global broker
     init_db()
     price_source = os.getenv("PRICE_SOURCE", "mock").lower()
 
     if BROKER == "paper":
-        pricer = ZerodhaData(api_key=KITE_API_KEY, access_token=KITE_ACCESS_TOKEN) if price_source == "zerodha" else None
-        broker = PaperBroker(SessionLocal, pricer=pricer)
+        state.pricer = ZerodhaData(api_key=KITE_API_KEY, access_token=KITE_ACCESS_TOKEN) if price_source == "zerodha" else None
+        state.broker = PaperBroker(SessionLocal, pricer=state.pricer)
     elif BROKER == "zerodha":
         from app.brokers.zerodha import ZerodhaBroker
-        broker = ZerodhaBroker(api_key=KITE_API_KEY, api_secret=KITE_API_SECRET, access_token=KITE_ACCESS_TOKEN)
+        state.broker = ZerodhaBroker(api_key=KITE_API_KEY, api_secret=KITE_API_SECRET, access_token=KITE_ACCESS_TOKEN)
     else:
-        broker = MockBroker()
+        state.broker = MockBroker()
 
     print(f"DB initialized, broker={BROKER}, price_source={price_source}")
 
-# ---------- Health ----------
-# ---------- Health / Root ----------
+
+# ---------- Root ----------
 @app.get("/", include_in_schema=False)
 def root():
     return RedirectResponse(url="/ui")
+
 
 # ---------- Broker Endpoints ----------
 @app.get("/broker/mode")
 def broker_mode(ok: bool = Depends(require_key)):
     return {"broker": BROKER}
 
+
 @app.get("/broker/ltp")
 def broker_ltp(symbol: str = Query(...), ok: bool = Depends(require_key)):
     try:
-        return {"symbol": symbol, "ltp": broker.ltp(symbol)}
+        return {"symbol": symbol, "ltp": state.broker.ltp(symbol)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"LTP error: {e}")
+
 
 class OrderIn(BaseModel):
     symbol: str
@@ -92,10 +91,11 @@ class OrderIn(BaseModel):
     variety: str = "regular"
     position_id: Optional[int] = None
 
+
 @app.post("/broker/order")
 def broker_place_order(payload: OrderIn, ok: bool = Depends(require_key), db: Session = Depends(get_db)):
-    # Step 1: Place through broker
-    resp = broker.place_order(
+    # Place through broker
+    resp = state.broker.place_order(
         symbol=payload.symbol,
         side=payload.side,
         qty=payload.qty,
@@ -105,7 +105,7 @@ def broker_place_order(payload: OrderIn, ok: bool = Depends(require_key), db: Se
         variety=payload.variety,
     )
 
-    # Step 2: Handle DB position
+    # Handle DB position
     pos = (
         db.query(Position)
         .filter(Position.symbol == payload.symbol, Position.status == "OPEN")
@@ -132,7 +132,7 @@ def broker_place_order(payload: OrderIn, ok: bool = Depends(require_key), db: Se
         db.commit()
         db.refresh(pos)
 
-    # Step 3: Record order
+    # Record order
     order = Order(
         position_id=pos.id,
         symbol=payload.symbol,
@@ -148,6 +148,7 @@ def broker_place_order(payload: OrderIn, ok: bool = Depends(require_key), db: Se
 
     return {"broker_response": resp, "position": pos.id, "order": order.id}
 
+
 @app.post("/broker/positions/{pos_id}/close")
 def close_position(pos_id: int, ok: bool = Depends(require_key), db: Session = Depends(get_db)):
     pos = db.get(Position, pos_id)
@@ -155,14 +156,12 @@ def close_position(pos_id: int, ok: bool = Depends(require_key), db: Session = D
         raise HTTPException(status_code=404, detail="Position not found or already closed")
 
     try:
-        ltp = broker.ltp(pos.symbol)
+        ltp = state.broker.ltp(pos.symbol)
     except Exception:
         ltp = pos.avg_price  # fallback
 
-    # Reverse side (BUY->SELL, SELL->BUY)
     reverse_side = "SELL" if pos.side == "BUY" else "BUY"
 
-    # Create exit order
     exit_order = Order(
         position_id=pos.id,
         symbol=pos.symbol,
@@ -174,17 +173,10 @@ def close_position(pos_id: int, ok: bool = Depends(require_key), db: Session = D
     )
     db.add(exit_order)
 
-    # Mark position closed
     pos.status = "CLOSED"
     pos.close_price = ltp
     pos.closed_at = datetime.utcnow()
-
-    # Save realised P&L at close
-    if pos.side == "BUY":
-        realised = (ltp - pos.avg_price) * pos.qty
-    else:
-        realised = (pos.avg_price - ltp) * pos.qty
-    pos.realised = realised
+    pos.realised = (ltp - pos.avg_price) * pos.qty if pos.side == "BUY" else (pos.avg_price - ltp) * pos.qty
 
     db.commit()
     db.refresh(pos)
@@ -202,34 +194,40 @@ def close_position(pos_id: int, ok: bool = Depends(require_key), db: Session = D
         "exit_order_id": exit_order.id,
     }
 
+
 @app.get("/broker/positions")
 def broker_positions(ok: bool = Depends(require_key)):
     with SessionLocal() as db:
         return [p.__dict__ for p in db.query(Position).all()]
+
 
 @app.get("/broker/orders")
 def broker_orders(ok: bool = Depends(require_key)):
     with SessionLocal() as db:
         return [o.__dict__ for o in db.query(Order).all()]
 
+
 @app.get("/broker/pnl")
 def broker_pnl(ok: bool = Depends(require_key)):
     def ltp_fn(sym: str) -> float:
-        return broker.ltp(sym)
+        return state.broker.ltp(sym)
     with SessionLocal() as db:
         return compute_today_pnl(db, ltp_fn)
 
+
 @app.post("/broker/pricer")
 def set_pricer(source: str = Body(embed=True), ok: bool = Depends(require_key)):
-    global broker
     s = source.strip().lower()
     if s == "zerodha":
-        broker.pricer = ZerodhaData(api_key=KITE_API_KEY, access_token=KITE_ACCESS_TOKEN)
+        state.pricer = ZerodhaData(api_key=KITE_API_KEY, access_token=KITE_ACCESS_TOKEN)
+        state.broker.pricer = state.pricer
     elif s == "mock":
-        broker.pricer = MockBroker()
+        state.pricer = MockBroker()
+        state.broker.pricer = state.pricer
     else:
         raise HTTPException(status_code=400, detail="source must be 'zerodha' or 'mock'")
     return {"ok": True, "source": s}
+
 
 # ---------- Kite Auth ----------
 @app.get("/kite/login", response_class=HTMLResponse)
@@ -239,6 +237,7 @@ def kite_login():
         return HTMLResponse("<h3>Set KITE_API_KEY in env first.</h3>", status_code=500)
     url = f"https://kite.trade/connect/login?v=3&api_key={api_key}"
     return HTMLResponse(f"<a href='{url}' target='_blank'>Login</a>")
+
 
 @app.get("/kite/callback")
 def kite_callback(request: Request):
@@ -270,108 +269,41 @@ def kite_callback(request: Request):
         with open(env_path, "w") as f:
             f.writelines(lines)
 
+        if state.pricer and isinstance(state.pricer, ZerodhaData):
+            state.pricer.access_token = access_token
+
         return {"message": "Access token saved to .env. Restart docker to apply.", "access_token": access_token}
     except Exception as e:
         return {"error": str(e)}
-# ---------- Instruments Sync ----------
+
+
+# ---------- Instruments ----------
 @app.post("/broker/instruments/sync")
 def sync_instruments(ok: bool = Depends(require_key)):
-    pricer = getattr(broker, "pricer", None)
-    if not isinstance(pricer, ZerodhaData):
+    if not isinstance(state.pricer, ZerodhaData):
         raise HTTPException(status_code=400, detail="Zerodha pricer not configured. Switch pricer to 'zerodha' first.")
     try:
-        count = pricer.sync_instruments()
+        count = state.pricer.sync_instruments()
         return {"message": f"Synced {count} instruments"}
     except Exception as e:
-        import traceback
-        print("Error in sync_instruments:", traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
-
 
 
 @app.get("/broker/instruments")
 def get_instruments(ok: bool = Depends(require_key)):
-    if not hasattr(broker, "pricer") or not broker.pricer:
+    if not state.pricer:
         raise HTTPException(status_code=400, detail="No pricer available")
     try:
-        instruments = broker.pricer.get_instruments()
-        return instruments
+        return state.pricer.get_instruments()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching instruments: {e}")
 
 
 @app.get("/broker/options/{underlying}")
 def get_options(underlying: str, ok: bool = Depends(require_key)):
-    if not isinstance(broker.pricer, ZerodhaData):
+    if not isinstance(state.pricer, ZerodhaData):
         raise HTTPException(400, "Pricer is not ZerodhaData")
-    return broker.pricer.option_chain(underlying)
-
-@app.get("/broker/options/{symbol}")
-def get_options(symbol: str, ok: bool = Depends(require_key)):
-    pricer = getattr(broker, "pricer", None)
-    if not isinstance(pricer, ZerodhaData):
-        raise HTTPException(status_code=400, detail="Zerodha pricer not configured. Switch pricer to 'zerodha' first.")
-
-    try:
-        df = pricer.load_instruments()
-        df = df[df["name"] == symbol.upper()]  # Filter only symbol contracts (e.g., NIFTY)
-        options = df.to_dict(orient="records")
-        return {"count": len(options), "options": options}
-    except Exception as e:
-        import traceback
-        print("Error in /broker/options:", traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Options fetch failed: {str(e)}")
-        
-        
-router = APIRouter()
-load_dotenv()
-
-# Assume you already have a global broker/pricer object for Zerodha
-
-
-@router.get("/kite/callback")
-async def kite_callback(request: Request):
-    req_token = request.query_params.get("request_token")
-    if not req_token:
-        return {"error": "Missing request_token"}
-
-    kite = KiteConnect(api_key=os.getenv("KITE_API_KEY"))
-
-    try:
-        data = kite.generate_session(req_token, api_secret=os.getenv("KITE_API_SECRET"))
-    except Exception as e:
-        return {"error": f"Failed to generate session: {str(e)}"}
-
-    access_token = data["access_token"]
-
-    # --- Save into .env (overwrite old entry) ---
-    env_path = ".env"
-    lines = []
-    if os.path.exists(env_path):
-        with open(env_path, "r") as f:
-            lines = f.readlines()
-
-    with open(env_path, "w") as f:
-        found = False
-        for line in lines:
-            if line.startswith("KITE_ACCESS_TOKEN="):
-                f.write(f"KITE_ACCESS_TOKEN={access_token}\n")
-                found = True
-            else:
-                f.write(line)
-        if not found:
-            f.write(f"KITE_ACCESS_TOKEN={access_token}\n")
-
-    # --- Apply immediately to running bot ---
-    kite.set_access_token(access_token)
-    if hasattr(pricer, "kite"):
-        pricer.kite.set_access_token(access_token)
-    pricer.access_token = access_token
-
-    return {
-        "message": "Access token updated (live + saved to .env).",
-        "access_token": access_token
-    }
+    return state.pricer.option_chain(underlying)
 
 
 # ---------- UI ----------
